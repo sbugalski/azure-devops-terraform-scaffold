@@ -1,0 +1,199 @@
+name: TF-$(Rev:r)
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+      - develop
+
+variables:
+  # ARM Connection
+  - name: ARM_CONNECTION
+    value: ''
+
+#  DevOps Controll
+  - name: TF_VERSION
+    value: "0.12.28"
+  - name: TF_IN_AUTOMATION
+    value: true
+  - name: TF_APPLY
+    value: false
+  - name: TF_DESTROY
+    value: false
+  - name: TF_FOLDER
+    value: $(Build.SourcesDirectory)/terraform/example
+
+  # Terraform Backend Variables
+  - name: TF_BACKEND_RESOURCE_GROUP_NAME
+    value: ''
+  - name: TF_BACKEND_REGION
+    value: ''
+  - name: TF_BACKEND_STORAGE_ACCOUNT_NAME
+    value: ''
+
+  # Terraform Variables
+  - name: TF_VAR_LOCATION
+    value: ''
+
+pool:
+  vmImage: 'ubuntu-18.04'
+
+stages:
+  - stage: TerraformPlan
+    displayName: Terraform Plan
+
+    jobs:
+      - job: TerraformPlan
+        displayName: TerrafromPlan
+
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: 'AzDO Pipelines Environment Setup'
+            inputs:
+              azureSubscription: $(ARM_CONNECTION)
+              scriptType: bash
+              scriptLocation: 'scriptPath'
+              scriptPath: 'scripts/azdo/environment-setup.sh'
+              addSpnToEnvironment: true
+              failOnStandardError: true
+
+          - task: AzureCLI@1
+            displayName: 'Prepare Terraform backend'
+            inputs:
+              azureSubscription: "$(ARM_CONNECTION)"
+              scriptLocation: 'scriptPath'
+              scriptPath: 'scripts/az/prepare-terraform-backend.sh'
+              failOnStandardError: true
+
+          - task: Bash@3
+            displayName: 'Terraform $(TF_VERSION) Download'
+            inputs:
+              filePath: 'scripts/terraform/download.sh'
+              failOnStderr: false
+
+          - task: Bash@3
+            displayName: 'Terraform Init'
+            inputs:
+              filePath: 'scripts/terraform/init.sh'
+              workingDirectory: $(TF_FOLDER)
+              failOnStderr: true
+            env:
+              ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(AZURE_TENANT_ID)
+              TF_IN_AUTOMATION: $(TF_IN_AUTOMATION)
+
+          - task: Bash@3
+            displayName: 'Terraform Plan TF_DESTROY=$(TF_DESTROY)'
+            timeoutInMinutes: 5
+            inputs:
+              filePath: 'scripts/terraform/plan.sh'
+              workingDirectory: $(TF_FOLDER)
+              failOnStderr: true
+            env:
+              ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(AZURE_TENANT_ID)
+              TF_IN_AUTOMATION: $(TF_IN_AUTOMATION)
+              TF_VAR_BASTIONIMAGE: $(BASTION_IMAGE_ID)
+              TF_VAR_RESOURCE_GROUP_NAME: $(K8S_RESOURCE_GROUP_NAME)
+              TF_VAR_KEYVAULT_NAME: $(KEYVAULT_NAME)
+              TF_VAR_KEYVAULT_RG: $(TF_BACKEND_RESOURCE_GROUP_NAME)
+              TF_VAR_location: $(TF_VAR_LOCATION)
+              TF_VAR_env: $(Build.SourceBranchName)
+
+          - task: ArchiveFiles@2
+            displayName: 'Create Terrafrom Plan Artifact'
+            inputs:
+              rootFolderOrFile: '$(TF_FOLDER)'
+              includeRootFolder: false
+              archiveType: 'tar'
+              tarCompression: 'gz'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).tgz'
+              replaceExistingArchive: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Terrafrom Plan Artifact'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'drop'
+              publishLocation: 'Container'
+
+  - stage: DeployInfra
+    displayName: Deploy Infra
+    condition: and(succeeded(), eq(variables['TF_APPLY'], true))
+    dependsOn: TerraformPlan
+
+    jobs:
+      - deployment: TerraformApply
+        displayName: Terraform Apply
+        environment: $(Build.SourceBranchName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - download: none
+
+                - task: DownloadBuildArtifacts@0
+                  displayName: 'Download artifacts'
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: 'drop'
+                    downloadPath: '$(System.ArtifactsDirectory)'
+
+                - task: ExtractFiles@1
+                  displayName: 'Extract Plan Artifact'
+                  inputs:
+                    archiveFilePatterns: '$(System.ArtifactsDirectory)/drop/$(Build.BuildId).tgz'
+                    destinationFolder: '$(TF_FOLDER)'
+                    cleanDestinationFolder: false
+
+                - task: Bash@3
+                  displayName: 'Terraform $(TF_VERSION) Download'
+                  inputs:
+                    filePath: 'scripts/terraform/download.sh'
+                    failOnStderr: false
+
+                - task: AzureCLI@2
+                  displayName: 'AzDO Pipelines Environment Setup'
+                  inputs:
+                    azureSubscription: $(ARM_CONNECTION)
+                    scriptType: bash
+                    scriptLocation: 'scriptPath'
+                    scriptPath: 'scripts/azdo/environment-setup.sh'
+                    addSpnToEnvironment: true
+                    failOnStandardError: true
+
+                - task: Bash@3
+                  displayName: 'Terraform Init'
+                  inputs:
+                    filePath: 'scripts/terraform/init.sh'
+                    workingDirectory: $(TF_FOLDER)
+                    failOnStderr: true
+                  env:
+                    ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(AZURE_TENANT_ID)
+
+                - task: Bash@3
+                  displayName: 'Terraform Apply'
+                  name: 'TerraformApply'
+                  inputs:
+                    filePath: 'scripts/terraform/apply.sh'
+                    workingDirectory: $(TF_FOLDER)
+                    failOnStderr: true
+                  env:
+                    ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(AZURE_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(AZURE_TENANT_ID)
+                    TF_IN_AUTOMATION: $(TF_IN_AUTOMATION)

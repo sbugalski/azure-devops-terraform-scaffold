@@ -1,0 +1,14 @@
+### General ###
+.DS_Store
+desktop.ini
+
+### Terraform ###
+# Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# .plan files
+*.plan
